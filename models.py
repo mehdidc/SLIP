@@ -14,6 +14,7 @@ from torch import nn
 
 import losses
 
+from timm.models.vision_transformer import VisionTransformer
 
 class LayerNorm(nn.LayerNorm):
     """Subclass torch's LayerNorm to handle fp16."""
@@ -299,12 +300,25 @@ def SIMCLR_VITB16(**kwargs):
 
     return model
 
-
 def SLIP_VITB16(**kwargs):
     vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
     model = SLIP(embed_dim=512, vision_width=768, vision_model=vision_model, context_length=77, vocab_size=49408,
         transformer_width=512, transformer_heads=8, transformer_layers=12, **kwargs)
 
+    return model
+
+def SLIP_VITB32_512x512(**kwargs):
+    vision_model = VisionTransformer(
+        img_size=512,
+        patch_size=32,
+        num_classes=0,
+        embed_dim=768,
+        depth=12,
+        num_heads=12, 
+        mlp_ratio=4.,
+    )
+    model = SLIP(embed_dim=512, vision_width=768, vision_model=vision_model, context_length=77, vocab_size=49408,
+        transformer_width=512, transformer_heads=8, transformer_layers=12, **kwargs)
     return model
 
 

@@ -56,6 +56,14 @@ class ImageCaptionDatasetBase(torch.utils.data.Dataset):
             self.samples = [(k, v) for k, v in samples.items()]
         elif self.dataset == 'cc12m' or self.dataset == 'cc3m':
             self.samples = np.load(metadata, allow_pickle=True)
+        elif self.dataset == 'lmdb':
+            from neotl.datasets.caffe_lmdb import CaffeLMDB
+            self.samples = CaffeLMDB(root, label_type="str")
+        elif self.dataset == 'lmdb_multiple':
+            from neotl.datasets.caffe_lmdb import CaffeLMDBMultiple
+            from glob import glob
+            import os
+            self.samples = CaffeLMDBMultiple(glob(os.path.join(root, "*")), label_type="str")
 
     def get_raw_item(self, i):
         if self.dataset == 'yfcc15m':
@@ -73,6 +81,12 @@ class ImageCaptionDatasetBase(torch.utils.data.Dataset):
             path = os.path.join(self.root, str(filename))
             img = pil_loader(path)
             caption = np.random.choice(captions)
+        elif self.dataset == 'lmdb':
+            img, caption = self.samples[i]
+            caption = caption.decode()
+        elif self.dataset == 'lmdb_multiple':
+            img, caption = self.samples[i]
+            caption = caption.decode()
         elif self.dataset == 'cc12m':
             ann = self.samples[i]
             filename, captions = ann['image_name'], ann['captions']
@@ -208,7 +222,7 @@ def get_dataset(train_transform, tokenizer, args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
     augment = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(0.08, 1.)),
+        transforms.RandomResizedCrop(args.image_size, scale=(0.08, 1.)),
         transforms.RandomApply([
             transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
         ], p=0.8),

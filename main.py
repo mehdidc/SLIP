@@ -33,7 +33,7 @@ import utils
 def get_args_parser():
     parser = argparse.ArgumentParser(description='SLIP training and evaluation', add_help=False)
     # Data
-    parser.add_argument('--dataset', default='yfcc15m', type=str, choices=['yfcc15m', 'cc3m', 'cc12m', 'coco'])
+    parser.add_argument('--dataset', default='yfcc15m', type=str, choices=['yfcc15m', 'cc3m', 'cc12m', 'coco', 'lmdb', 'lmdb_multiple'])
     parser.add_argument('--root', default='', type=str,
                         help='path to dataset root')
     parser.add_argument('--metadata', default='yfcc15m.pkl', type=str,
@@ -41,6 +41,7 @@ def get_args_parser():
     parser.add_argument('--output-dir', default='./', type=str, help='output dir')
     # Model
     parser.add_argument('--model', default='SLIP_VITB16', type=str)
+    parser.add_argument('--image-size', default=224, type=int)
     parser.add_argument('--ssl-mlp-dim', default=4096, type=int,
                         help='hidden dim of SimCLR mlp projection head')
     parser.add_argument('--ssl-emb-dim', default=256, type=int,
@@ -165,13 +166,13 @@ def main(args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
     train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.5, 1.0)),
+            transforms.RandomResizedCrop(args.image_size, scale=(0.5, 1.0)),
             transforms.ToTensor(),
             normalize
         ])
     val_transform = transforms.Compose([
-            transforms.Resize(224),
-            transforms.CenterCrop(224),
+            transforms.Resize(args.image_size),
+            transforms.CenterCrop(args.image_size),
             transforms.ToTensor(),
             normalize
         ])
@@ -180,7 +181,9 @@ def main(args):
     cwd = os.path.dirname(os.path.realpath(__file__))
     with open(os.path.join(cwd, 'dataset_catalog.json')) as f:
         root = json.load(f)['imagenet']['path']
-    val_dataset = ImageFolder(os.path.join(root, 'val'), val_transform)
+    # val_dataset = ImageFolder(os.path.join('val'), val_transform)
+    from neotl.datasets.caffe_lmdb import CaffeLMDB
+    val_dataset = CaffeLMDB('val', transform=val_transform, label_type="int")
 
     # dist eval resamples data to pad uneven batch sizes
     # make sure num_samples = 0 mod num_gpus for exact acc
