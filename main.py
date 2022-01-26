@@ -34,6 +34,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser(description='SLIP training and evaluation', add_help=False)
     # Data
     parser.add_argument('--dataset', default='yfcc15m', type=str, choices=['yfcc15m', 'cc3m', 'cc12m', 'coco', 'lmdb', 'lmdb_multiple'])
+    parser.add_argument('--nb_iter_per_epoch', default=0, type=int)
     parser.add_argument('--root', default='', type=str,
                         help='path to dataset root')
     parser.add_argument('--metadata', default='yfcc15m.pkl', type=str,
@@ -75,6 +76,7 @@ def get_args_parser():
     parser.add_argument('-j', '--workers', default=10, type=int, metavar='N',
                         help='number of data loading workers per process')
     parser.add_argument('--evaluate', action='store_true', help='eval only')
+    parser.add_argument('--only_train', action='store_true', default=False, help='train only')
     parser.add_argument('--world-size', default=1, type=int,
                         help='number of nodes for distributed training')
     parser.add_argument('--rank', default=0, type=int,
@@ -90,6 +92,17 @@ def get_args_parser():
 
 best_acc1 = 0
 
+def caffe_lmdb_multiple_worker_init_fn(worker_id):
+    import lmdb
+    worker_info = torch.utils.data.get_worker_info()
+    nb = worker_info.num_workers
+    dataset = worker_info.dataset  # the dataset copy in this worker process
+    if hasattr(dataset, "samples"):
+        if hasattr(dataset.samples, "datasets"):
+            for ds in dataset.samples.datasets:
+                ds.env = lmdb.open(ds.root,readonly=True, max_readers=1, lock=False, readahead=False, meminit=False)
+        # else:
+            # dataset.samples.env = lmdb.open(dataset.samples.root,readonly=True, max_readers=1, lock=False, readahead=False, meminit=False)
 
 def main(args):
     utils.init_distributed_mode(args)
@@ -197,7 +210,8 @@ def main(args):
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
-
+    if args.nb_iter_per_epoch:
+        train_loader = StepsPerEpoch(train_loader, args.nb_iter_per_epoch)
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=(val_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=False)
@@ -229,6 +243,9 @@ def main(args):
 
         # train for one epoch
         train_stats = train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, args)
+        
+        if args.only_train:
+            continue
 
         if (epoch + 1) % args.eval_freq != 0:
             continue
@@ -239,7 +256,7 @@ def main(args):
         else:
             val_stats = validate_zeroshot(val_loader, model, tokenizer, args)
             acc1 = val_stats['acc1']
-
+        
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
@@ -336,7 +353,8 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule,
                         'scaler': scaler.get_scale(),
                         'logit': logit_scale})
             progress.display(optim_iter)
-
+        if args.nb_iter_per_epoch and data_iter >= args.nb_iter_per_epoch:
+            break
     progress.synchronize()
     return {**{k: v.avg for k, v in metrics.items()},
             'lr': optimizer.param_groups[0]['lr'],
@@ -478,6 +496,25 @@ def accuracy(output, target, topk=(1,)):
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
+
+class StepsPerEpoch:
+
+    def __init__(self, dl, steps):
+        self.dl = dl
+        self.steps = steps
+
+    def __iter__(self):
+        dl = iter(self.dl)
+        for i in range(self.steps):
+            try:
+                d = next(dl)
+            except Exception:
+                dl = iter(self.dl)
+                d = next(dl)
+            yield d
+    
+    def __len__(self):
+        return self.steps
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('SLIP training and evaluation', parents=[get_args_parser()])
