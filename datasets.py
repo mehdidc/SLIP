@@ -17,6 +17,7 @@ from torchvision import transforms
 from torchvision import datasets as t_datasets
 
 import utils
+import wds
 
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -93,14 +94,19 @@ class ImageCaptionDatasetBase(torch.utils.data.Dataset):
             path = os.path.join(self.root, filename)
             img = pil_loader(path)
             caption = np.random.choice(captions)
-
+        elif self.dataset == "synthetic":
+            img = Image.new('RGB', (256, 256))
+            caption = "A man with a walking stick and  Frisbee holding a woman in a grassy area."
         return img, caption
 
     def __getitem__(self, i):
         raise NotImplementedError
 
     def __len__(self):
-        return len(self.samples)
+        if self.dataset == "synthetic":
+            return 100000000
+        else:
+            return len(self.samples)
 
 
 class ImageCaptionDatasetCLIP(ImageCaptionDatasetBase):
@@ -239,3 +245,46 @@ def get_dataset(train_transform, tokenizer, args):
         return ImageCaptionDatasetCLIP(args.dataset, args.root, args.metadata, train_transform, tokenizer)
     elif args.model.startswith('SLIP'):
         return ImageCaptionDatasetSLIP(args.dataset, args.root, args.metadata, train_transform, augment, tokenizer)
+
+normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225])
+ssl_augment = transforms.Compose([
+    transforms.RandomResizedCrop(224, scale=(0.08, 1.)),
+    transforms.RandomApply([
+        transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
+    ], p=0.8),
+    transforms.RandomGrayscale(p=0.2),
+    transforms.RandomApply([utils.GaussianBlur([.1, 2.])], p=0.5),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    normalize,
+])
+base_train_transform = transforms.Compose([
+        transforms.RandomResizedCrop(224, scale=(0.5, 1.0)),
+        transforms.ToTensor(),
+        normalize
+])
+
+def get_wds_dataset(train_transform, tokenizer, args):
+
+    if args.model.startswith('SIMCLR'):
+        #TODO
+        raise NotImplementedError()
+    elif args.model.startswith('CLIP'):
+        #TODO
+        raise NotImplementedError()
+    elif args.model.startswith('SLIP'):
+        class wds_args:
+            distributed = args.distributed
+            batch_size = args.batch_size
+            train_data = args.root
+            workers = args.workers
+            world_size = args.world_size
+            rank = args.rank
+        return wds.get_wds_dataset(wds_args, preprocess_img_slip, True)
+
+def preprocess_img_slip(x):
+    im = base_train_transform(x)
+    x1 = ssl_augment(x)
+    x2 = ssl_augment(x)
+    return torch.stack((im,x1,x2))
