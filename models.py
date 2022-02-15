@@ -236,14 +236,14 @@ class SLIP(CLIP):
                 'aug2_embed': aug2_embed}
 
 
-def get_loss(model, ssl_temp, ssl_scale):
+def get_loss(model, ssl_temp, ssl_scale, ssl_gather_type, clip_gather_type):
     if model.startswith('SLIP'):
-        ssl_loss = losses.SIMCLRLoss(temperature=ssl_temp)
-        return losses.SLIPLoss(ssl_loss, ssl_scale)
+        ssl_loss = losses.SIMCLRLoss(temperature=ssl_temp, gather_type=ssl_gather_type)
+        return losses.SLIPLoss(ssl_loss, ssl_scale, clip_gather_type=clip_gather_type)
     if model.startswith('CLIP'):
-        return losses.CLIPLoss()
+        return losses.CLIPLoss(gather_type=clip_gather_type)
     if model.startswith('SIMCLR'):
-        return losses.SIMCLRLoss(temperature=ssl_temp)
+        return losses.SIMCLRLoss(temperature=ssl_temp, gather_type=ssl_gather_type)
 
 
 def get_metric_names(model):
@@ -286,12 +286,20 @@ def SLIP_VITS16(**kwargs):
     return model
 
 
-def CLIP_VITB16(**kwargs):
-    vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
-    model = CLIP(embed_dim=512, vision_width=768, vision_model=vision_model, context_length=77, vocab_size=49408,
+def SLIP_VITL14(**kwargs):
+    vision_model = VisionTransformer(
+        img_size=224,
+        patch_size=14,
+        num_classes=0,
+        embed_dim=1024,
+        depth=24,
+        num_heads=16, 
+        mlp_ratio=4.,
+    )
+    model = SLIP(embed_dim=512, vision_width=1024, vision_model=vision_model, context_length=77, vocab_size=49408,
         transformer_width=512, transformer_heads=8, transformer_layers=12, **kwargs)
-
     return model
+
 
 
 def SIMCLR_VITB16(**kwargs):
@@ -305,6 +313,20 @@ def SLIP_VITB16(**kwargs):
     model = SLIP(embed_dim=512, vision_width=768, vision_model=vision_model, context_length=77, vocab_size=49408,
         transformer_width=512, transformer_heads=8, transformer_layers=12, **kwargs)
 
+    return model
+
+def SLIP_VITB32(**kwargs):
+    vision_model = VisionTransformer(
+        img_size=224,
+        patch_size=32,
+        num_classes=0,
+        embed_dim=768,
+        depth=12,
+        num_heads=12, 
+        mlp_ratio=4.,
+    )
+    model = SLIP(embed_dim=512, vision_width=768, vision_model=vision_model, context_length=77, vocab_size=49408,
+        transformer_width=512, transformer_heads=8, transformer_layers=12, **kwargs)
     return model
 
 def SLIP_VITB32_512x512(**kwargs):
