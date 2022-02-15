@@ -28,18 +28,27 @@ import datasets
 import models
 from tokenizer import SimpleTokenizer
 import utils
+from caffe_lmdb import CaffeLMDB
 
 
 def get_args_parser():
     parser = argparse.ArgumentParser(description='SLIP training and evaluation', add_help=False)
     # Data
-    parser.add_argument('--dataset', default='yfcc15m', type=str, choices=['yfcc15m', 'cc3m', 'cc12m', 'coco', 'lmdb', 'lmdb_multiple'])
+    parser.add_argument('--dataset', default='yfcc15m', type=str, choices=['yfcc15m', 'cc3m', 'cc12m', 'coco', 'lmdb', 'lmdb_multiple', 'synthetic', 'wds'])
+
+    parser.add_argument('--val-root', default='val', type=str)
+    parser.add_argument('--val-dataset', default='lmdb', type=str)
+
     parser.add_argument('--nb_iter_per_epoch', default=0, type=int)
     parser.add_argument('--root', default='', type=str,
                         help='path to dataset root')
     parser.add_argument('--metadata', default='yfcc15m.pkl', type=str,
                         help='path to metadata file (see README for details)')
     parser.add_argument('--output-dir', default='./', type=str, help='output dir')
+   
+    parser.add_argument('--clip-gather-type', default='all_gather_batch', type=str)
+    parser.add_argument('--ssl-gather-type', default='all_gather_batch_with_grad', type=str)
+
     # Model
     parser.add_argument('--model', default='SLIP_VITB16', type=str)
     parser.add_argument('--image-size', default=224, type=int)
@@ -92,18 +101,6 @@ def get_args_parser():
 
 best_acc1 = 0
 
-def caffe_lmdb_multiple_worker_init_fn(worker_id):
-    import lmdb
-    worker_info = torch.utils.data.get_worker_info()
-    nb = worker_info.num_workers
-    dataset = worker_info.dataset  # the dataset copy in this worker process
-    if hasattr(dataset, "samples"):
-        if hasattr(dataset.samples, "datasets"):
-            for ds in dataset.samples.datasets:
-                ds.env = lmdb.open(ds.root,readonly=True, max_readers=1, lock=False, readahead=False, meminit=False)
-        # else:
-            # dataset.samples.env = lmdb.open(dataset.samples.root,readonly=True, max_readers=1, lock=False, readahead=False, meminit=False)
-
 def main(args):
     utils.init_distributed_mode(args)
 
@@ -123,7 +120,7 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], bucket_cap_mb=200)
 
     # define loss function (criterion) and optimizer
-    criterion = models.get_loss(args.model, args.ssl_temp, args.ssl_scale).cuda(args.gpu)
+    criterion = models.get_loss(args.model, args.ssl_temp, args.ssl_scale, args.ssl_gather_type, args.clip_gather_type).cuda(args.gpu)
 
     p_wd, p_non_wd = [], []
     for n, p in model.named_parameters():
@@ -182,7 +179,7 @@ def main(args):
             transforms.RandomResizedCrop(args.image_size, scale=(0.5, 1.0)),
             transforms.ToTensor(),
             normalize
-        ])
+    ])
     val_transform = transforms.Compose([
             transforms.Resize(args.image_size),
             transforms.CenterCrop(args.image_size),
@@ -190,31 +187,50 @@ def main(args):
             normalize
         ])
 
-    train_dataset = datasets.get_dataset(train_transform, tokenizer, args)
     cwd = os.path.dirname(os.path.realpath(__file__))
     with open(os.path.join(cwd, 'dataset_catalog.json')) as f:
         root = json.load(f)['imagenet']['path']
-    # val_dataset = ImageFolder(os.path.join('val'), val_transform)
-    from neotl.datasets.caffe_lmdb import CaffeLMDB
-    val_dataset = CaffeLMDB('val', transform=val_transform, label_type="int")
+
+    if args.val_dataset == 'image_folder':
+        val_dataset = ImageFolder(args.val_root, val_transform)
+    elif args.val_dataset == 'lmdb':
+        val_dataset = CaffeLMDB(args.val_root, transform=val_transform, label_type="int")
+    else:
+        raise ValueError(args.val_dataset)
 
     # dist eval resamples data to pad uneven batch sizes
     # make sure num_samples = 0 mod num_gpus for exact acc
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-        val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
+    if args.dataset == "wds":
+        train_loader_info = datasets.get_wds_dataset(train_transform, tokenizer, args)
+        train_loader = train_loader_info.dataloader
+        # print("WDS num samples", train_loader.num_samples)
+        if args.distributed:
+            val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
+        else:
+            val_sampler = None
     else:
-        train_sampler = None
-        val_sampler = None
+        train_dataset = datasets.get_dataset(train_transform, tokenizer, args)
+        if args.distributed:
+            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+            val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
+        else:
+            train_sampler = None
+            val_sampler = None
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+            num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True,
+            persistent_workers=True,
+        )
+    
     if args.nb_iter_per_epoch:
         train_loader = StepsPerEpoch(train_loader, args.nb_iter_per_epoch)
+    
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=(val_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=False)
+        num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=False,
+        persistent_workers=True,
+    )
 
     if args.evaluate:
         if args.model.startswith('SIMCLR'):
@@ -227,8 +243,12 @@ def main(args):
                 f.write(json.dumps(zero_stats) + '\n')
         return
 
+    if hasattr(train_loader, "num_batches"):
+        nb_batches = train_loader.num_batches
+    else:
+        nb_batches = len(train_loader)
     lr_schedule = utils.cosine_scheduler(args.lr, args.lr_end, args.epochs,
-        len(train_loader) // args.update_freq, warmup_epochs=args.warmup_epochs, start_warmup_value=args.lr_start)
+        nb_batches // args.update_freq, warmup_epochs=args.warmup_epochs, start_warmup_value=args.lr_start)
 
     if utils.is_main_process() and args.wandb:
         wandb_id = os.path.split(args.output_dir)[-1]
@@ -239,7 +259,10 @@ def main(args):
     print("=> beginning training")
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
-            train_sampler.set_epoch(epoch)
+            if args.dataset == "wds":
+                os.environ['WDS_EPOCH'] = str(epoch)
+            else:
+                train_sampler.set_epoch(epoch)
 
         # train for one epoch
         train_stats = train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, args)
@@ -282,11 +305,15 @@ def main(args):
 
 
 def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, args):
-    batch_time = AverageMeter('Time', ':6.2f')
-    data_time = AverageMeter('Data', ':6.2f')
+    batch_time = AverageMeter('Time', ':6.4f')
+    data_time = AverageMeter('Data', ':6.4f')
     mem = AverageMeter('Mem (GB)', ':6.1f')
     metric_names = models.get_metric_names(args.model)
-    iters_per_epoch = len(train_loader) // args.update_freq
+    if hasattr(train_loader, "num_batches"): 
+        nb_batches = train_loader.num_batches
+    else:
+        nb_batches = len(train_loader)
+    iters_per_epoch = nb_batches // args.update_freq
     metrics = OrderedDict([(name, AverageMeter(name, ':.2e')) for name in metric_names])
     progress = ProgressMeter(
         iters_per_epoch,
@@ -298,6 +325,26 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule,
 
     end = time.time()
     for data_iter, inputs in enumerate(train_loader):
+        
+        if args.dataset == "wds":
+            if args.model.startswith("SLIP"):
+                images, text = inputs
+                image, augment1, augment2 = images[:,0], images[:,1], images[:,2]
+                ### DEBUG
+                # import torchvision
+                # mean = torch.Tensor([0.485, 0.456, 0.406]).view(1,-1,1,1)
+                # std = torch.Tensor([0.229, 0.224, 0.225]).view(1,-1,1,1)
+                # im = image*std+mean
+                # a1 = augment1*std+mean
+                # a2 = augment2*std+mean
+                # torchvision.utils.save_image(im[0], "image.png")
+                # torchvision.utils.save_image(a1[0], "a1.png")
+                # torchvision.utils.save_image(a2[0], "a2.png")
+                ####
+                inputs = image, text, augment1, augment2
+            else:
+                raise NotImplementedError()
+
         optim_iter = data_iter // args.update_freq
 
         # measure data loading time
