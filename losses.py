@@ -11,10 +11,12 @@ import utils
 
 
 class CLIPLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, gather_type="all_gather_batch"):
         super().__init__()
         self.labels = None
         self.last_local_batch_size = None
+        self.gather_type = gather_type
+        print("CLIP gather type", gather_type)
 
     def forward(self, outputs):
         image_embed = outputs['image_embed']
@@ -23,9 +25,12 @@ class CLIPLoss(nn.Module):
         local_batch_size = image_embed.size(0)
 
         if local_batch_size != self.last_local_batch_size:
-            self.labels = local_batch_size * utils.get_rank() + torch.arange(
-                local_batch_size, device=image_embed.device
-            )
+            if self.gather_type == "no_gather":
+                self.labels = torch.arange(local_batch_size, device=image_embed.device)
+            else:
+                self.labels = local_batch_size * utils.get_rank() + torch.arange(
+                    local_batch_size, device=image_embed.device
+                )
             self.last_local_batch_size = local_batch_size
 
         # normalized features
@@ -33,8 +38,14 @@ class CLIPLoss(nn.Module):
         text_embed = F.normalize(text_embed, dim=-1, p=2)
 
         # gather features from all GPUs
-        image_embed_all, text_embed_all = \
-            utils.all_gather_batch([image_embed, text_embed])
+        if self.gather_type == "all_gather_batch":
+            image_embed_all, text_embed_all = \
+                utils.all_gather_batch([image_embed, text_embed])
+        elif self.gather_type == "all_gather_batch_with_grad":
+            image_embed_all, text_embed_all = \
+                utils.all_gather_batch_with_grad([image_embed, text_embed])
+        elif self.gather_type == "no_gather":
+            image_embed_all, text_embed_all = image_embed, text_embed
 
         # cosine similarity as logits
         logits_per_image = logit_scale * image_embed @ text_embed_all.t()
@@ -63,12 +74,14 @@ class SIMCLRLoss(nn.Module):
         temperature (float): the temperature to be applied on the logits
     """
 
-    def __init__(self, temperature=0.1):
+    def __init__(self, temperature=0.1, gather_type="all_gather_batch_with_grad"):
         super().__init__()
         self.tau = temperature
         self.labels = None
         self.masks = None
         self.last_local_batch_size = None
+        self.gather_type = gather_type
+        print("SIMCLR gather type", gather_type)
 
     def forward(self, outputs):
         q_a = outputs['aug1_embed']
@@ -78,15 +91,24 @@ class SIMCLRLoss(nn.Module):
         q_b = F.normalize(q_b, dim=-1, p=2)
 
         local_batch_size = q_a.size(0)
+        
+        # k_a, k_b = utils.all_gather_batch_with_grad([q_a, q_b])
 
-        k_a, k_b = utils.all_gather_batch_with_grad([q_a, q_b])
+        if self.gather_type == "all_gather_batch":
+            k_a, k_b = utils.all_gather_batch([q_a, q_b])
+        elif self.gather_type == "all_gather_batch_with_grad":
+            k_a, k_b = utils.all_gather_batch_with_grad([q_a, q_b])
+        elif self.gather_type == "no_gather":
+            k_a, k_b =  q_a, q_b
 
         if local_batch_size != self.last_local_batch_size:
-            self.labels = local_batch_size * utils.get_rank() + torch.arange(
-                local_batch_size, device=q_a.device
-            )
             total_batch_size = local_batch_size * utils.get_world_size()
-            self.masks = F.one_hot(self.labels, total_batch_size) * 1e9
+            if self.gather_type == "no_gather":
+                self.labels = torch.arange(local_batch_size, device=q_a.device)
+                self.masks = F.one_hot(self.labels, local_batch_size) * 1e9
+            else:
+                self.labels = local_batch_size * utils.get_rank() + torch.arange(local_batch_size, device=q_a.device)
+                self.masks = F.one_hot(self.labels, total_batch_size) * 1e9
             self.last_local_batch_size = local_batch_size
 
         logits_aa = torch.matmul(q_a, k_a.transpose(0, 1)) / self.tau
@@ -110,9 +132,9 @@ class SIMCLRLoss(nn.Module):
 
 
 class SLIPLoss(nn.Module):
-    def __init__(self, ssl_loss, ssl_scale):
+    def __init__(self, ssl_loss, ssl_scale, clip_gather_type):
         super().__init__()
-        self.clip_loss = CLIPLoss()
+        self.clip_loss = CLIPLoss(gather_type=clip_gather_type)
         self.ssl_loss = ssl_loss
         self.ssl_scale = ssl_scale
 
