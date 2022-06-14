@@ -43,14 +43,13 @@ def main(args):
     state_dict = OrderedDict()
     for k, v in ckpt['state_dict'].items():
         state_dict[k.replace('module.', '')] = v
-    
     # create model
     old_args = ckpt['args']
     print("=> creating model: {}".format(old_args.model))
     model = getattr(models, old_args.model)(rand_embed=False,
         ssl_mlp_dim=old_args.ssl_mlp_dim, ssl_emb_dim=old_args.ssl_emb_dim)
     model.cuda()
-    model.load_state_dict(state_dict, strict=True)
+    model.load_state_dict(state_dict, strict=False)
     print("=> loaded resume checkpoint '{}' (epoch {})".format(args.resume, ckpt['epoch']))
 
     cudnn.benchmark = True

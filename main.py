@@ -38,6 +38,7 @@ def get_args_parser():
 
     parser.add_argument('--val-root', default='val', type=str)
     parser.add_argument('--val-dataset', default='lmdb', type=str)
+    parser.add_argument('--val-template', default='imagenet', type=str)
 
     parser.add_argument('--nb_iter_per_epoch', default=0, type=int)
     parser.add_argument('--root', default='', type=str,
@@ -82,7 +83,7 @@ def get_args_parser():
                         help='disable mixed-precision training (requires more memory and compute)')
     # System
     parser.add_argument('--print-freq', default=10, type=int, help='print frequency')
-    parser.add_argument('-j', '--workers', default=10, type=int, metavar='N',
+    parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
                         help='number of data loading workers per process')
     parser.add_argument('--evaluate', action='store_true', help='eval only')
     parser.add_argument('--only_train', action='store_true', default=False, help='train only')
@@ -219,7 +220,7 @@ def main(args):
 
         train_loader = torch.utils.data.DataLoader(
             train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-            num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True,
+            num_workers=args.workers, pin_memory=False, sampler=train_sampler, drop_last=True,
             persistent_workers=True,
         )
     
@@ -228,7 +229,7 @@ def main(args):
     
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=(val_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=False,
+        num_workers=args.workers, pin_memory=False, sampler=val_sampler, drop_last=False,
         persistent_workers=True,
     )
 
@@ -322,7 +323,7 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule,
 
     # switch to train mode
     model.train()
-
+    epoch_start_time = time.time()
     end = time.time()
     for data_iter, inputs in enumerate(train_loader):
         
@@ -342,6 +343,11 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule,
                 # torchvision.utils.save_image(a2[0], "a2.png")
                 ####
                 inputs = image, text, augment1, augment2
+            elif args.model.startswith("CLIP"):
+                image, text = inputs
+            elif args.model.startswith("SIMCLR"):
+                images, text = inputs
+                inputs = augment1, augment2 = images[:,0], images[:,1]
             else:
                 raise NotImplementedError()
 
@@ -403,9 +409,12 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule,
         if args.nb_iter_per_epoch and data_iter >= args.nb_iter_per_epoch:
             break
     progress.synchronize()
+    epoch_duration = time.time() - epoch_start_time
     return {**{k: v.avg for k, v in metrics.items()},
             'lr': optimizer.param_groups[0]['lr'],
-            'logit_scale': logit_scale}
+            'logit_scale': logit_scale,
+            'epoch_duration': epoch_duration,
+    }
 
 
 def validate_zeroshot(val_loader, model, tokenizer, args):
@@ -423,7 +432,7 @@ def validate_zeroshot(val_loader, model, tokenizer, args):
     print('=> encoding captions')
     cwd = os.path.dirname(os.path.realpath(__file__))
     with open(os.path.join(cwd, 'templates.json')) as f:
-        templates = json.load(f)['imagenet']
+        templates = json.load(f)[args.val_template]
 
     with open(os.path.join(cwd, 'labels.json')) as f:
         labels = json.load(f)['imagenet']

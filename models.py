@@ -329,6 +329,20 @@ def SLIP_VITB32(**kwargs):
         transformer_width=512, transformer_heads=8, transformer_layers=12, **kwargs)
     return model
 
+def CLIP_VITB32(**kwargs):
+    vision_model = VisionTransformer(
+        img_size=224,
+        patch_size=32,
+        num_classes=0,
+        embed_dim=768,
+        depth=12,
+        num_heads=12, 
+        mlp_ratio=4.,
+    )
+    model = CLIP(embed_dim=512, vision_width=768, vision_model=vision_model, context_length=77, vocab_size=49408,
+        transformer_width=512, transformer_heads=8, transformer_layers=12, **kwargs)
+    return model
+
 def SLIP_VITB32_512x512(**kwargs):
     vision_model = VisionTransformer(
         img_size=512,

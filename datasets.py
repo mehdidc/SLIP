@@ -268,11 +268,24 @@ base_train_transform = transforms.Compose([
 def get_wds_dataset(train_transform, tokenizer, args):
 
     if args.model.startswith('SIMCLR'):
-        #TODO
-        raise NotImplementedError()
+        class wds_args:
+            distributed = args.distributed
+            batch_size = args.batch_size
+            train_data = args.root
+            workers = args.workers
+            world_size = args.world_size
+            rank = args.rank
+        return wds.get_wds_dataset(wds_args, preprocess_img_ssl, True)
     elif args.model.startswith('CLIP'):
         #TODO
-        raise NotImplementedError()
+        class wds_args:
+            distributed = args.distributed
+            batch_size = args.batch_size
+            train_data = args.root
+            workers = args.workers
+            world_size = args.world_size
+            rank = args.rank
+        return wds.get_wds_dataset(wds_args, base_train_transform, True)
     elif args.model.startswith('SLIP'):
         class wds_args:
             distributed = args.distributed
@@ -287,4 +300,12 @@ def preprocess_img_slip(x):
     im = base_train_transform(x)
     x1 = ssl_augment(x)
     x2 = ssl_augment(x)
-    return torch.stack((im,x1,x2))
+    return torch.stack((im, x1,x2))
+
+def preprocess_img_ssl(x):
+    im = base_train_transform(x)
+    x1 = ssl_augment(x)
+    x2 = ssl_augment(x)
+    return torch.stack((x1,x2))
+
+preprocess_img_ssl = preprocess_img_slip
